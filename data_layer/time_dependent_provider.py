@@ -96,7 +96,8 @@ class TimeDependentTrafficProvider:
         Returns:
             int: 节点的连续索引
         """
-        if isinstance(node, int):
+        if isinstance(node, (int, np.integer)):
+            node = int(node)
             # 如果已经是连续索引，直接返回
             if 0 <= node < self.num_nodes:
                 return node
