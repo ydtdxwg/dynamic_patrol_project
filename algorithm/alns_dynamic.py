@@ -55,14 +55,10 @@ class DynamicALNS:
         num_nodes = len(topology_bundle['coords_array'])
         target_indices = [i for i in range(num_nodes) if i not in hub_indices]
 
-        # 服务时间计算使用默认值，因为风险现在是动态查询的
-        node_service_time = np.full(num_nodes, self.config.service_time_min, dtype=float)
-
         return build_runtime_context(
             dist_uav=dist_matrix_uav,
             hub_indices=hub_indices,
             target_indices=target_indices,
-            node_service_time=node_service_time,
             w_risk=self.config.w_risk,
             w_cover=self.config.w_cover,
             t_max=self.config.t_max,
@@ -76,6 +72,8 @@ class DynamicALNS:
             uav_max_stops_per_trip=getattr(self.config, 'uav_max_stops_per_trip', 4),
             traffic_provider=self.traffic_provider,
             current_time_minutes=current_time,
+            service_time_min=self.config.service_time_min,
+            service_time_max=self.config.service_time_max,
         )
 
     def _build_initial_state(self, context, rnd):

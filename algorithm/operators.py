@@ -14,7 +14,6 @@ class RuntimeContext:
     dist_uav: np.ndarray
     hub_indices: list
     target_indices: list
-    node_service_time: np.ndarray
     w_risk: float
     w_cover: float
     t_max: float
@@ -26,15 +25,22 @@ class RuntimeContext:
     shaw_chi: float
     shaw_noise: float
     uav_max_stops_per_trip: int = 4
-    traffic_provider: object = None
-    current_time_minutes: float = None
+    traffic_provider: any = None
+    current_time_minutes: float = 0.0
+    service_time_min: float = 0.0
+    service_time_max: float = 0.0
+    
+    def get_dynamic_service_time(self, node, arrival_time):
+        if self.traffic_provider is None:
+            return self.service_time_min
+        risk = self.traffic_provider.get_node_risk(arrival_time, node)
+        return self.service_time_min + (risk / 10.0) * (self.service_time_max - self.service_time_min)
 
 
 def build_runtime_context(
     dist_uav,
     hub_indices,
     target_indices,
-    node_service_time,
     w_risk,
     w_cover,
     t_max,
@@ -48,12 +54,13 @@ def build_runtime_context(
     uav_max_stops_per_trip=4,
     traffic_provider=None,
     current_time_minutes=None,
+    service_time_min=None,
+    service_time_max=None,
 ):
     return RuntimeContext(
         dist_uav=dist_uav,
         hub_indices=list(hub_indices),
         target_indices=list(target_indices),
-        node_service_time=node_service_time,
         w_risk=w_risk,
         w_cover=w_cover,
         t_max=t_max,
@@ -67,6 +74,8 @@ def build_runtime_context(
         uav_max_stops_per_trip=uav_max_stops_per_trip,
         traffic_provider=traffic_provider,
         current_time_minutes=current_time_minutes,
+        service_time_min=service_time_min,
+        service_time_max=service_time_max,
     )
 
 
@@ -76,6 +85,7 @@ class PatrolState(State):
         self.uav_trips = uav_trips
         self.unassigned = unassigned
         self.context = context
+        self.node_arrival_times = {}
 
         if car_durations is None:
             self.car_durations = self._recalc_durations()
@@ -86,25 +96,31 @@ class PatrolState(State):
 
     def _recalc_durations(self):
         durs = []
+        self.node_arrival_times.clear()
         for r in self.car_routes:
             current_t = self.context.current_time_minutes
             for i in range(len(r) - 1):
                 travel_time = self.context.traffic_provider.get_car_travel_time(current_t, r[i], r[i + 1])
                 current_t += travel_time
-                if r[i + 1] not in self.context.hub_indices:
-                    current_t += self.context.node_service_time[r[i + 1]]
+                next_node = r[i + 1]
+                self.node_arrival_times[next_node] = current_t
+                if next_node not in self.context.hub_indices:
+                    service_time = self.context.get_dynamic_service_time(next_node, current_t)
+                    current_t += service_time
             total_duration = current_t - self.context.current_time_minutes
             durs.append(total_duration)
         return durs
 
     def copy(self):
-        return PatrolState(
+        new_state = PatrolState(
             [list(r) for r in self.car_routes],
             [list(t) for t in self.uav_trips],
             list(self.unassigned),
             self.context,
             list(self.car_durations),
         )
+        new_state.node_arrival_times = self.node_arrival_times.copy()
+        return new_state
 
     def objective(self):
         if self._objective is None:
@@ -135,8 +151,9 @@ class PatrolState(State):
                         # 在到达节点的那一刻查询风险
                         risk = self.context.traffic_provider.get_node_risk(current_t, next_node)
                         risk_sum += risk
-                    # 加上服务时间
-                    current_t += self.context.node_service_time[next_node]
+                    # 加上动态服务时间
+                    service_time = self.context.get_dynamic_service_time(next_node, current_t)
+                    current_t += service_time
         
         # 计算无人机路径的风险（使用基准时间）
         for t in self.uav_trips:
@@ -155,7 +172,7 @@ def uav_trip_time(trip, context, current_time=None, traffic_matrix=None):
     _ = current_time
     _ = traffic_matrix
     fly = sum(context.dist_uav[trip[i], trip[i + 1]] for i in range(len(trip) - 1))
-    svc = sum(context.node_service_time[trip[i]] for i in range(1, len(trip) - 1))
+    svc = sum(context.get_dynamic_service_time(trip[i], context.current_time_minutes) for i in range(1, len(trip) - 1))
     return float(fly + svc)
 
 
@@ -164,11 +181,12 @@ def check_insert_uav_trip(trip, node, pos, context, current_time=None, traffic_m
         return False, 0.0
     prev_n = trip[pos - 1]
     next_n = trip[pos]
+    service_time = context.get_dynamic_service_time(node, context.current_time_minutes)
     delta = (
         context.dist_uav[prev_n, node]
         + context.dist_uav[node, next_n]
         - context.dist_uav[prev_n, next_n]
-        + context.node_service_time[node]
+        + service_time
     )
     if uav_trip_time(trip, context, current_time=current_time, traffic_matrix=traffic_matrix) + delta > context.uav_endurance:
         return False, float(delta)
@@ -189,8 +207,10 @@ def check_insert_turbo(state, car_idx, node, pos, context, current_time=None, tr
     for i in range(len(new_route) - 1):
         travel_time = context.traffic_provider.get_car_travel_time(current_t, new_route[i], new_route[i+1])
         current_t += travel_time
-        if new_route[i+1] not in context.hub_indices:
-            current_t += context.node_service_time[new_route[i+1]]
+        next_node = new_route[i+1]
+        if next_node not in context.hub_indices:
+            service_time = context.get_dynamic_service_time(next_node, current_t)
+            current_t += service_time
     new_duration = current_t - context.current_time_minutes
     
     delta = new_duration - current_duration
@@ -274,10 +294,14 @@ def destroy_shaw(state, rnd, context, current_time=None, traffic_matrix=None):
     while len(removed) < k and assigned:
         pivot = rnd.choice(removed)
         candidates = []
+        t_pivot = state.node_arrival_times.get(pivot, context.current_time_minutes)
         for n in assigned:
-            dist = context.traffic_provider.get_car_travel_time(context.current_time_minutes, pivot, n)
-            risk_pivot = context.traffic_provider.get_node_risk(context.current_time_minutes, pivot)
-            risk_n = context.traffic_provider.get_node_risk(context.current_time_minutes, n)
+            t_n = state.node_arrival_times.get(n, context.current_time_minutes)
+            # 使用两个节点的到达时间的平均值作为查询时间
+            query_time = (t_pivot + t_n) / 2
+            dist = context.traffic_provider.get_car_travel_time(query_time, pivot, n)
+            risk_pivot = context.traffic_provider.get_node_risk(t_pivot, pivot)
+            risk_n = context.traffic_provider.get_node_risk(t_n, n)
             risk_diff = abs(risk_pivot - risk_n)
             R = context.shaw_phi * dist + context.shaw_chi * risk_diff
             candidates.append((n, R))
@@ -310,13 +334,29 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
 
         for ri in range(context.num_cars):
             route = s.car_routes[ri]
-            step = 2 if len(route) > 8 else 1
-            for i in range(1, len(route), step):
+            # 第一阶段：O(1) 粗筛
+            static_deltas = []
+            for i in range(1, len(route)):
+                prev_n = route[i - 1]
+                next_n = route[i]
+                # 使用基准时间查询静态截面距离
+                dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
+                dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
+                dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                static_delta = dist_prev_node + dist_node_next - dist_prev_next
+                static_deltas.append((i, static_delta))
+            
+            # 只保留 static_delta 最小的前 3 个位置
+            static_deltas.sort(key=lambda x: x[1])
+            top_positions = static_deltas[:3]
+            
+            # 第二阶段：O(N) 精算
+            for pos, _ in top_positions:
                 valid, delta = check_insert_turbo(
                     s,
                     ri,
                     node,
-                    i,
+                    pos,
                     context,
                     current_time=current_time,
                     traffic_matrix=traffic_matrix,
@@ -325,7 +365,7 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
                     gain = node_risk * context.w_risk - delta * 0.1
                     if gain > best_gain:
                         best_gain = gain
-                        best_act = ('c', ri, i, delta)
+                        best_act = ('c', ri, pos, delta)
 
         for ti, trip in enumerate(s.uav_trips):
             num_stops = len(trip) - 2
@@ -349,7 +389,8 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
         if len(s.uav_trips) < context.max_uav_trips:
             dists = [context.dist_uav[h, node] for h in context.hub_indices]
             h_idx = context.hub_indices[int(np.argmin(dists))]
-            ft = context.dist_uav[h_idx, node] * 2 + context.node_service_time[node]
+            service_time = context.get_dynamic_service_time(node, context.current_time_minutes)
+            ft = context.dist_uav[h_idx, node] * 2 + service_time
             if ft <= context.uav_endurance:
                 gain = node_risk * context.w_risk + 5
                 if gain > best_gain:
@@ -388,20 +429,36 @@ def repair_regret(state, rnd, context, current_time=None, traffic_matrix=None):
 
             for ri in range(context.num_cars):
                 route = s.car_routes[ri]
-                step = 2 if len(route) > 8 else 1
-                for i in range(1, len(route), step):
+                # 第一阶段：O(1) 粗筛
+                static_deltas = []
+                for i in range(1, len(route)):
+                    prev_n = route[i - 1]
+                    next_n = route[i]
+                    # 使用基准时间查询静态截面距离
+                    dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
+                    dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
+                    dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                    static_delta = dist_prev_node + dist_node_next - dist_prev_next
+                    static_deltas.append((i, static_delta))
+                
+                # 只保留 static_delta 最小的前 3 个位置
+                static_deltas.sort(key=lambda x: x[1])
+                top_positions = static_deltas[:3]
+                
+                # 第二阶段：O(N) 精算
+                for pos, _ in top_positions:
                     valid, delta = check_insert_turbo(
                         s,
                         ri,
                         node,
-                        i,
+                        pos,
                         context,
                         current_time=current_time,
                         traffic_matrix=traffic_matrix,
                     )
                     if valid:
                         score = delta - node_risk * context.w_risk
-                        act = ('c', ri, i, delta)
+                        act = ('c', ri, pos, delta)
                         if score < best_sol[0]:
                             second_sol = best_sol
                             best_sol = (score, act)
