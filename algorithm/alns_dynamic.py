@@ -37,11 +37,9 @@ class DynamicALNS:
             raise ValueError('static_environment 不能为空；DynamicALNS 不在类内部初始化静态矩阵。')
 
         topology_bundle = self.static_environment.get_topology_bundle()
-        traffic_bundle = self.traffic_provider.get_snapshot(current_time=current_time)
 
-        dist_matrix_car = traffic_bundle.get('dist_matrix_car', topology_bundle['dist_matrix_car'])
-        dist_matrix_uav = traffic_bundle.get('dist_matrix_uav', topology_bundle['dist_matrix_uav'])
-        risk_array = traffic_bundle.get('risk_array', topology_bundle['risk_array'])
+        # 只使用静态环境中的 UAV 距离矩阵，因为无人机不受地面拥堵影响
+        dist_matrix_uav = topology_bundle['dist_matrix_uav']
 
         if getattr(self.config, 'uav_time_scale', 1.0) != 1.0:
             dist_matrix_uav = dist_matrix_uav * float(self.config.uav_time_scale)
@@ -49,25 +47,19 @@ class DynamicALNS:
         if self.hub_selector is not None:
             hub_indices = self.hub_selector(topology_bundle, current_time=current_time)
         else:
-            hub_indices = list(traffic_bundle.get('hub_indices', []))
+            # 尝试从静态环境中获取 hub_indices
+            hub_indices = list(topology_bundle.get('hub_indices', []))
             if not hub_indices:
-                raise ValueError('缺少 hub_indices，请通过 traffic_provider 或 hub_selector 提供。')
+                raise ValueError('缺少 hub_indices，请通过 hub_selector 提供。')
 
         num_nodes = len(topology_bundle['coords_array'])
         target_indices = [i for i in range(num_nodes) if i not in hub_indices]
 
-        r_min = risk_array.min()
-        r_max = risk_array.max()
-        norm = (risk_array - r_min) / (r_max - r_min) if r_max > r_min else np.zeros(num_nodes)
-        node_service_time = (
-            self.config.service_time_min
-            + norm * (self.config.service_time_max - self.config.service_time_min)
-        ).astype(float)
+        # 服务时间计算使用默认值，因为风险现在是动态查询的
+        node_service_time = np.full(num_nodes, self.config.service_time_min, dtype=float)
 
         return build_runtime_context(
-            dist_car=dist_matrix_car,
             dist_uav=dist_matrix_uav,
-            nodes_risk=risk_array,
             hub_indices=hub_indices,
             target_indices=target_indices,
             node_service_time=node_service_time,
@@ -82,8 +74,8 @@ class DynamicALNS:
             shaw_chi=self.config.shaw_chi,
             shaw_noise=self.config.shaw_noise,
             uav_max_stops_per_trip=getattr(self.config, 'uav_max_stops_per_trip', 4),
-            current_time=current_time,
-            traffic_matrix=traffic_bundle.get('traffic_matrix'),
+            traffic_provider=self.traffic_provider,
+            current_time_minutes=current_time,
         )
 
     def _build_initial_state(self, context, rnd):

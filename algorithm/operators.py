@@ -11,9 +11,7 @@ except ImportError:
 
 @dataclass
 class RuntimeContext:
-    dist_car: np.ndarray
     dist_uav: np.ndarray
-    nodes_risk: np.ndarray
     hub_indices: list
     target_indices: list
     node_service_time: np.ndarray
@@ -28,14 +26,12 @@ class RuntimeContext:
     shaw_chi: float
     shaw_noise: float
     uav_max_stops_per_trip: int = 4
-    current_time: object = None
-    traffic_matrix: object = None
+    traffic_provider: object = None
+    current_time_minutes: float = None
 
 
 def build_runtime_context(
-    dist_car,
     dist_uav,
-    nodes_risk,
     hub_indices,
     target_indices,
     node_service_time,
@@ -50,13 +46,11 @@ def build_runtime_context(
     shaw_chi,
     shaw_noise,
     uav_max_stops_per_trip=4,
-    current_time=None,
-    traffic_matrix=None,
+    traffic_provider=None,
+    current_time_minutes=None,
 ):
     return RuntimeContext(
-        dist_car=dist_car,
         dist_uav=dist_uav,
-        nodes_risk=nodes_risk,
         hub_indices=list(hub_indices),
         target_indices=list(target_indices),
         node_service_time=node_service_time,
@@ -71,8 +65,8 @@ def build_runtime_context(
         shaw_chi=shaw_chi,
         shaw_noise=shaw_noise,
         uav_max_stops_per_trip=uav_max_stops_per_trip,
-        current_time=current_time,
-        traffic_matrix=traffic_matrix,
+        traffic_provider=traffic_provider,
+        current_time_minutes=current_time_minutes,
     )
 
 
@@ -93,12 +87,14 @@ class PatrolState(State):
     def _recalc_durations(self):
         durs = []
         for r in self.car_routes:
-            t = 0
+            current_t = self.context.current_time_minutes
             for i in range(len(r) - 1):
-                t += self.context.dist_car[r[i], r[i + 1]]
+                travel_time = self.context.traffic_provider.get_car_travel_time(current_t, r[i], r[i + 1])
+                current_t += travel_time
                 if r[i + 1] not in self.context.hub_indices:
-                    t += self.context.node_service_time[r[i + 1]]
-            durs.append(t)
+                    current_t += self.context.node_service_time[r[i + 1]]
+            total_duration = current_t - self.context.current_time_minutes
+            durs.append(total_duration)
         return durs
 
     def copy(self):
@@ -118,15 +114,39 @@ class PatrolState(State):
 
     def calc_stats(self):
         visited = set()
+        risk_sum = 0.0
+        
+        # 计算警车路径的风险（动态查询）
         for r in self.car_routes:
-            for n in r:
-                if n not in self.context.hub_indices:
-                    visited.add(n)
+            current_t = self.context.current_time_minutes
+            for i in range(len(r) - 1):
+                # 从当前节点到下一个节点
+                current_node = r[i]
+                next_node = r[i + 1]
+                
+                # 计算行驶时间并更新当前时间
+                travel_time = self.context.traffic_provider.get_car_travel_time(current_t, current_node, next_node)
+                current_t += travel_time
+                
+                # 如果下一个节点不是 hub，计算风险并加上服务时间
+                if next_node not in self.context.hub_indices:
+                    if next_node not in visited:
+                        visited.add(next_node)
+                        # 在到达节点的那一刻查询风险
+                        risk = self.context.traffic_provider.get_node_risk(current_t, next_node)
+                        risk_sum += risk
+                    # 加上服务时间
+                    current_t += self.context.node_service_time[next_node]
+        
+        # 计算无人机路径的风险（使用基准时间）
         for t in self.uav_trips:
             for n in t:
-                if n not in self.context.hub_indices:
+                if n not in self.context.hub_indices and n not in visited:
                     visited.add(n)
-        return sum(self.context.nodes_risk[list(visited)]), len(visited)
+                    risk = self.context.traffic_provider.get_node_risk(self.context.current_time_minutes, n)
+                    risk_sum += risk
+        
+        return risk_sum, len(visited)
 
 
 def uav_trip_time(trip, context, current_time=None, traffic_matrix=None):
@@ -160,15 +180,21 @@ def check_insert_turbo(state, car_idx, node, pos, context, current_time=None, tr
     _ = traffic_matrix
     route = state.car_routes[car_idx]
     current_duration = state.car_durations[car_idx]
-    prev_n = route[pos - 1]
-    next_n = route[pos]
-    delta = (
-        context.dist_car[prev_n, node]
-        + context.dist_car[node, next_n]
-        - context.dist_car[prev_n, next_n]
-        + context.node_service_time[node]
-    )
-    if current_duration + delta > context.t_max:
+    
+    # 构建新路径
+    new_route = route[:pos] + [node] + route[pos:]
+    
+    # 对新路径进行完整的时间推演
+    current_t = context.current_time_minutes
+    for i in range(len(new_route) - 1):
+        travel_time = context.traffic_provider.get_car_travel_time(current_t, new_route[i], new_route[i+1])
+        current_t += travel_time
+        if new_route[i+1] not in context.hub_indices:
+            current_t += context.node_service_time[new_route[i+1]]
+    new_duration = current_t - context.current_time_minutes
+    
+    delta = new_duration - current_duration
+    if new_duration > context.t_max:
         return False, delta
     return True, delta
 
@@ -215,7 +241,7 @@ def destroy_worst(state, rnd, context, current_time=None, traffic_matrix=None):
     if not assigned:
         return s
 
-    assigned.sort(key=lambda x: context.nodes_risk[x])
+    assigned.sort(key=lambda x: context.traffic_provider.get_node_risk(context.current_time_minutes, x))
     k = rnd.randint(10, min(len(assigned), 50))
     rem_ids = set(assigned[:k])
 
@@ -249,8 +275,10 @@ def destroy_shaw(state, rnd, context, current_time=None, traffic_matrix=None):
         pivot = rnd.choice(removed)
         candidates = []
         for n in assigned:
-            dist = context.dist_car[pivot, n]
-            risk_diff = abs(context.nodes_risk[pivot] - context.nodes_risk[n])
+            dist = context.traffic_provider.get_car_travel_time(context.current_time_minutes, pivot, n)
+            risk_pivot = context.traffic_provider.get_node_risk(context.current_time_minutes, pivot)
+            risk_n = context.traffic_provider.get_node_risk(context.current_time_minutes, n)
+            risk_diff = abs(risk_pivot - risk_n)
             R = context.shaw_phi * dist + context.shaw_chi * risk_diff
             candidates.append((n, R))
 
@@ -278,6 +306,7 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
     for node in batch:
         best_gain = float('-inf')
         best_act = None
+        node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
 
         for ri in range(context.num_cars):
             route = s.car_routes[ri]
@@ -293,7 +322,7 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
                     traffic_matrix=traffic_matrix,
                 )
                 if valid:
-                    gain = context.nodes_risk[node] * context.w_risk - delta * 0.1
+                    gain = node_risk * context.w_risk - delta * 0.1
                     if gain > best_gain:
                         best_gain = gain
                         best_act = ('c', ri, i, delta)
@@ -312,7 +341,7 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
                     traffic_matrix=traffic_matrix,
                 )
                 if valid_u:
-                    gain = context.nodes_risk[node] * context.w_risk - delta_u * 0.05 + 3.0
+                    gain = node_risk * context.w_risk - delta_u * 0.05 + 3.0
                     if gain > best_gain:
                         best_gain = gain
                         best_act = ('u_ins', ti, pos, delta_u)
@@ -322,7 +351,7 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
             h_idx = context.hub_indices[int(np.argmin(dists))]
             ft = context.dist_uav[h_idx, node] * 2 + context.node_service_time[node]
             if ft <= context.uav_endurance:
-                gain = context.nodes_risk[node] * context.w_risk + 5
+                gain = node_risk * context.w_risk + 5
                 if gain > best_gain:
                     best_gain = gain
                     best_act = ('u_new', h_idx)
@@ -355,6 +384,7 @@ def repair_regret(state, rnd, context, current_time=None, traffic_matrix=None):
         for node in batch:
             best_sol = (float('inf'), None)
             second_sol = (float('inf'), None)
+            node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
 
             for ri in range(context.num_cars):
                 route = s.car_routes[ri]
@@ -370,7 +400,7 @@ def repair_regret(state, rnd, context, current_time=None, traffic_matrix=None):
                         traffic_matrix=traffic_matrix,
                     )
                     if valid:
-                        score = delta - context.nodes_risk[node] * context.w_risk
+                        score = delta - node_risk * context.w_risk
                         act = ('c', ri, i, delta)
                         if score < best_sol[0]:
                             second_sol = best_sol
