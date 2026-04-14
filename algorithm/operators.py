@@ -53,9 +53,9 @@ def build_runtime_context(
     shaw_noise,
     uav_max_stops_per_trip=4,
     traffic_provider=None,
-    current_time_minutes=None,
-    service_time_min=None,
-    service_time_max=None,
+    current_time_minutes=0.0,
+    service_time_min=0.0,
+    service_time_max=0.0,
 ):
     return RuntimeContext(
         dist_uav=dist_uav,
@@ -100,7 +100,10 @@ class PatrolState(State):
         for r in self.car_routes:
             current_t = self.context.current_time_minutes
             for i in range(len(r) - 1):
-                travel_time = self.context.traffic_provider.get_car_travel_time(current_t, r[i], r[i + 1])
+                if self.context.traffic_provider is not None:
+                    travel_time = self.context.traffic_provider.get_car_travel_time(current_t, r[i], r[i + 1])
+                else:
+                    travel_time = 0.0
                 current_t += travel_time
                 next_node = r[i + 1]
                 self.node_arrival_times[next_node] = current_t
@@ -141,7 +144,10 @@ class PatrolState(State):
                 next_node = r[i + 1]
                 
                 # 计算行驶时间并更新当前时间
-                travel_time = self.context.traffic_provider.get_car_travel_time(current_t, current_node, next_node)
+                if self.context.traffic_provider is not None:
+                    travel_time = self.context.traffic_provider.get_car_travel_time(current_t, current_node, next_node)
+                else:
+                    travel_time = 0.0
                 current_t += travel_time
                 
                 # 如果下一个节点不是 hub，计算风险并加上服务时间
@@ -149,7 +155,10 @@ class PatrolState(State):
                     if next_node not in visited:
                         visited.add(next_node)
                         # 在到达节点的那一刻查询风险
-                        risk = self.context.traffic_provider.get_node_risk(current_t, next_node)
+                        if self.context.traffic_provider is not None:
+                            risk = self.context.traffic_provider.get_node_risk(current_t, next_node)
+                        else:
+                            risk = 0.0
                         risk_sum += risk
                     # 加上动态服务时间
                     service_time = self.context.get_dynamic_service_time(next_node, current_t)
@@ -160,7 +169,10 @@ class PatrolState(State):
             for n in t:
                 if n not in self.context.hub_indices and n not in visited:
                     visited.add(n)
-                    risk = self.context.traffic_provider.get_node_risk(self.context.current_time_minutes, n)
+                    if self.context.traffic_provider is not None:
+                        risk = self.context.traffic_provider.get_node_risk(self.context.current_time_minutes, n)
+                    else:
+                        risk = 0.0
                     risk_sum += risk
         
         return risk_sum, len(visited)
@@ -205,7 +217,10 @@ def check_insert_turbo(state, car_idx, node, pos, context, current_time=None, tr
     # 对新路径进行完整的时间推演
     current_t = context.current_time_minutes
     for i in range(len(new_route) - 1):
-        travel_time = context.traffic_provider.get_car_travel_time(current_t, new_route[i], new_route[i+1])
+        if context.traffic_provider is not None:
+            travel_time = context.traffic_provider.get_car_travel_time(current_t, new_route[i], new_route[i+1])
+        else:
+            travel_time = 0.0
         current_t += travel_time
         next_node = new_route[i+1]
         if next_node not in context.hub_indices:
@@ -261,7 +276,8 @@ def destroy_worst(state, rnd, context, current_time=None, traffic_matrix=None):
     if not assigned:
         return s
 
-    assigned.sort(key=lambda x: context.traffic_provider.get_node_risk(context.current_time_minutes, x))
+    if context.traffic_provider is not None:
+        assigned.sort(key=lambda x: context.traffic_provider.get_node_risk(context.current_time_minutes, x))
     k = rnd.randint(10, min(len(assigned), 50))
     rem_ids = set(assigned[:k])
 
@@ -299,10 +315,14 @@ def destroy_shaw(state, rnd, context, current_time=None, traffic_matrix=None):
             t_n = state.node_arrival_times.get(n, context.current_time_minutes)
             # 使用两个节点的到达时间的平均值作为查询时间
             query_time = (t_pivot + t_n) / 2
-            dist = context.traffic_provider.get_car_travel_time(query_time, pivot, n)
-            risk_pivot = context.traffic_provider.get_node_risk(t_pivot, pivot)
-            risk_n = context.traffic_provider.get_node_risk(t_n, n)
-            risk_diff = abs(risk_pivot - risk_n)
+            if context.traffic_provider is not None:
+                dist = context.traffic_provider.get_car_travel_time(query_time, pivot, n)
+                risk_pivot = context.traffic_provider.get_node_risk(t_pivot, pivot)
+                risk_n = context.traffic_provider.get_node_risk(t_n, n)
+                risk_diff = abs(risk_pivot - risk_n)
+            else:
+                dist = 0.0
+                risk_diff = 0.0
             R = context.shaw_phi * dist + context.shaw_chi * risk_diff
             candidates.append((n, R))
 
@@ -330,7 +350,10 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
     for node in batch:
         best_gain = float('-inf')
         best_act = None
-        node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
+        if context.traffic_provider is not None:
+            node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
+        else:
+            node_risk = 0.0
 
         for ri in range(context.num_cars):
             route = s.car_routes[ri]
@@ -340,9 +363,14 @@ def repair_greedy(state, rnd, context, current_time=None, traffic_matrix=None):
                 prev_n = route[i - 1]
                 next_n = route[i]
                 # 使用基准时间查询静态截面距离
-                dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
-                dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
-                dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                if context.traffic_provider is not None:
+                    dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
+                    dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
+                    dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                else:
+                    dist_prev_node = 0.0
+                    dist_node_next = 0.0
+                    dist_prev_next = 0.0
                 static_delta = dist_prev_node + dist_node_next - dist_prev_next
                 static_deltas.append((i, static_delta))
             
@@ -425,7 +453,10 @@ def repair_regret(state, rnd, context, current_time=None, traffic_matrix=None):
         for node in batch:
             best_sol = (float('inf'), None)
             second_sol = (float('inf'), None)
-            node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
+            if context.traffic_provider is not None:
+                node_risk = context.traffic_provider.get_node_risk(context.current_time_minutes, node)
+            else:
+                node_risk = 0.0
 
             for ri in range(context.num_cars):
                 route = s.car_routes[ri]
@@ -435,9 +466,14 @@ def repair_regret(state, rnd, context, current_time=None, traffic_matrix=None):
                     prev_n = route[i - 1]
                     next_n = route[i]
                     # 使用基准时间查询静态截面距离
-                    dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
-                    dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
-                    dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                    if context.traffic_provider is not None:
+                        dist_prev_node = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, node)
+                        dist_node_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, node, next_n)
+                        dist_prev_next = context.traffic_provider.get_car_travel_time(context.current_time_minutes, prev_n, next_n)
+                    else:
+                        dist_prev_node = 0.0
+                        dist_node_next = 0.0
+                        dist_prev_next = 0.0
                     static_delta = dist_prev_node + dist_node_next - dist_prev_next
                     static_deltas.append((i, static_delta))
                 

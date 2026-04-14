@@ -44,6 +44,12 @@ class RHOController:
             # 如果没有警车路线，使用原始的 hub_indices
             new_hub_indices = current_state.context.hub_indices[:current_state.context.num_cars]
 
+        # 处理未分配的节点
+        if hasattr(current_state, 'unassigned'):
+            for node in current_state.unassigned:
+                if node not in current_state.context.hub_indices:
+                    pending_nodes.add(node)
+
         # 确保 pending_nodes 只包含目标节点
         pending_nodes = pending_nodes.intersection(current_state.context.target_indices)
 

@@ -104,6 +104,7 @@ class DynamicALNS:
                 context,
                 current_time=current_time,
                 traffic_matrix=context.traffic_matrix,
+                random_state=random_state,
             )
         )
         alns.add_destroy_operator(
