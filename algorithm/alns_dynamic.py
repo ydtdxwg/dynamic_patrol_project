@@ -32,7 +32,7 @@ class DynamicALNS:
         self.hub_selector = hub_selector
         self.random_seed = random_seed
 
-    def _build_context(self, current_time=None):
+    def _build_context(self, current_time=None, target_indices=None):
         if self.static_environment is None:
             raise ValueError('static_environment 不能为空；DynamicALNS 不在类内部初始化静态矩阵。')
 
@@ -52,8 +52,9 @@ class DynamicALNS:
             if not hub_indices:
                 raise ValueError('缺少 hub_indices，请通过 hub_selector 提供。')
 
-        num_nodes = len(topology_bundle['coords_array'])
-        target_indices = [i for i in range(num_nodes) if i not in hub_indices]
+        if target_indices is None:
+            num_nodes = len(topology_bundle['coords_array'])
+            target_indices = [i for i in range(num_nodes) if i not in hub_indices]
 
         return build_runtime_context(
             dist_uav=dist_matrix_uav,
@@ -87,12 +88,12 @@ class DynamicALNS:
             traffic_matrix=context.traffic_matrix,
         )
 
-    def solve(self, current_time=None, max_iterations=1000, use_regret=False):
+    def solve(self, current_time=None, max_iterations=1000, use_regret=False, target_indices=None):
         if ALNS is None:
             raise ImportError('未安装 alns 库，请先安装后再运行 DynamicALNS。')
 
         rnd = np.random.RandomState(self.random_seed)
-        context = self._build_context(current_time=current_time)
+        context = self._build_context(current_time=current_time, target_indices=target_indices)
         init_sol = self._build_initial_state(context, rnd)
 
         alns = ALNS(np.random.RandomState(self.random_seed))
