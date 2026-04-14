@@ -248,10 +248,15 @@ def destroy_random(state, rnd, context, current_time=None, traffic_matrix=None):
             if n not in context.hub_indices:
                 assigned.append(('u', ti, i, n))
 
-    if len(assigned) < 5:
+    if len(assigned) < 2:
         return s
-
-    k = rnd.randint(20, min(len(assigned), 60))
+    lower_bound = min(20, max(1, len(assigned) // 2))
+    upper_bound = min(len(assigned), 60)
+    # 安全生成 k
+    if lower_bound < upper_bound:
+        k = rnd.randint(lower_bound, upper_bound)
+    else:
+        k = lower_bound
     indices = rnd.choice(len(assigned), k, replace=False)
     to_remove = [assigned[i] for i in indices]
     rem_ids = set([x[3] for x in to_remove])
@@ -273,12 +278,17 @@ def destroy_worst(state, rnd, context, current_time=None, traffic_matrix=None):
         for n in r:
             if n not in context.hub_indices:
                 assigned.append(n)
-    if not assigned:
+    if len(assigned) < 2:
         return s
-
     if context.traffic_provider is not None:
         assigned.sort(key=lambda x: context.traffic_provider.get_node_risk(context.current_time_minutes, x))
-    k = rnd.randint(10, min(len(assigned), 50))
+    lower_bound = min(10, max(1, len(assigned) // 2))
+    upper_bound = min(len(assigned), 50)
+    # 安全生成 k
+    if lower_bound < upper_bound:
+        k = rnd.randint(lower_bound, upper_bound)
+    else:
+        k = lower_bound
     rem_ids = set(assigned[:k])
 
     s.car_routes = [[n for n in r if n not in rem_ids] for r in s.car_routes]
@@ -299,13 +309,19 @@ def destroy_shaw(state, rnd, context, current_time=None, traffic_matrix=None):
             if n not in context.hub_indices:
                 assigned.append(n)
 
-    if len(assigned) < 5:
+    if len(assigned) < 2:
         return s
 
     pivot = rnd.choice(assigned)
     assigned.remove(pivot)
     removed = [pivot]
-    k = rnd.randint(5, min(len(assigned) + 1, 15))
+    # 动态适应规模
+    lower_bound = min(5, max(1, len(assigned) // 3))
+    upper_bound = min(len(assigned) + 1, 15)
+    if lower_bound < upper_bound:
+        k = rnd.randint(lower_bound, upper_bound)
+    else:
+        k = lower_bound
 
     while len(removed) < k and assigned:
         pivot = rnd.choice(removed)
