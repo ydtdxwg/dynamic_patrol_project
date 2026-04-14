@@ -29,6 +29,7 @@ class RuntimeContext:
     current_time_minutes: float = 0.0
     service_time_min: float = 0.0
     service_time_max: float = 0.0
+    traffic_matrix: any = None
     
     def get_dynamic_service_time(self, node, arrival_time):
         if self.traffic_provider is None:

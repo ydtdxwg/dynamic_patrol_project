@@ -3,6 +3,7 @@ from typing import Union, Optional
 
 
 class TimeDependentTrafficProvider:
+    _warned_inf_pairs = set()
     """
     时间依赖的交通数据提供器
     
@@ -41,7 +42,7 @@ class TimeDependentTrafficProvider:
         
         # 加载数据
         try:
-            data = np.load(npz_path)
+            data = np.load(npz_path, allow_pickle=True)
         except Exception as e:
             raise Exception(f"加载时空张量失败: {e}")
         
@@ -73,8 +74,11 @@ class TimeDependentTrafficProvider:
         Returns:
             int: 时间槽索引 (0-287)
         """
+        if current_time_minutes is None or not np.isfinite(current_time_minutes):
+            raise ValueError(f"当前时间无效: {current_time_minutes}")
+
         # 计算时间槽索引
-        idx = int(current_time_minutes // self.TIME_SLOT_MINUTES)
+        idx = int(float(current_time_minutes) // self.TIME_SLOT_MINUTES)
         
         # 处理越界情况，确保索引在有效范围内
         idx = min(idx, self.TOTAL_TIME_SLOTS - 1)
@@ -128,7 +132,14 @@ class TimeDependentTrafficProvider:
             j = self._get_node_index(node_j)
             
             # 返回行驶时间
-            return self.car_time_tensor[time_idx, i, j]
+            travel_time = float(self.car_time_tensor[time_idx, i, j])
+            if not np.isfinite(travel_time):
+                key = (time_idx, i, j)
+                if key not in self._warned_inf_pairs:
+                    print(f"获取车辆行驶时间失败: 车辆行驶时间无效: {travel_time}")
+                    self._warned_inf_pairs.add(key)
+                return 999999.0
+            return travel_time
         except Exception as e:
             print(f"获取车辆行驶时间失败: {e}")
             # 返回一个较大的惩罚距离
@@ -177,7 +188,10 @@ class TimeDependentTrafficProvider:
             i = self._get_node_index(node)
             
             # 返回风险值
-            return self.risk_tensor[time_idx, i]
+            risk = float(self.risk_tensor[time_idx, i])
+            if not np.isfinite(risk):
+                raise ValueError(f"节点风险值无效: {risk}")
+            return risk
         except Exception as e:
             print(f"获取节点风险值失败: {e}")
             # 返回默认风险值

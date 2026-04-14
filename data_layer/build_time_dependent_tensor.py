@@ -220,12 +220,16 @@ def build_car_time_tensor(link_speed_dict, net_df, node_map, num_nodes):
                             row_indices.append(start_idx)
                             col_indices.append(end_idx)
                             data.append(travel_time)
+                            # 与静态实验保持一致：地面警车路网按无向图处理
+                            row_indices.append(end_idx)
+                            col_indices.append(start_idx)
+                            data.append(travel_time)
                     
                     # 创建稀疏矩阵
                     if data:
                         adj_matrix = coo_matrix((data, (row_indices, col_indices)), shape=(num_nodes, num_nodes))
-                        # 计算所有节点对的最短路径
-                        dist_matrix = shortest_path(csgraph=adj_matrix, directed=True, method='D')
+                        # 与静态实验保持一致，按无向图计算所有节点对最短路径
+                        dist_matrix = shortest_path(csgraph=adj_matrix, directed=False, method='D')
                         car_time_tensor[t] = dist_matrix
                     else:
                         # 如果没有数据，使用无穷大

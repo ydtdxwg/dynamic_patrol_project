@@ -45,16 +45,19 @@ class DynamicALNS:
             dist_matrix_uav = dist_matrix_uav * float(self.config.uav_time_scale)
 
         if self.hub_selector is not None:
-            hub_indices = self.hub_selector(topology_bundle, current_time=current_time)
+            hub_indices = list(self.hub_selector(topology_bundle, current_time=current_time))
         else:
             # 尝试从静态环境中获取 hub_indices
             hub_indices = list(topology_bundle.get('hub_indices', []))
             if not hub_indices:
                 raise ValueError('缺少 hub_indices，请通过 hub_selector 提供。')
 
+        if len(hub_indices) < self.config.num_cars:
+            hub_indices = hub_indices + [hub_indices[0]] * (self.config.num_cars - len(hub_indices))
+
         if target_indices is None:
             num_nodes = len(topology_bundle['coords_array'])
-            target_indices = [i for i in range(num_nodes) if i not in hub_indices]
+            target_indices = [i for i in range(num_nodes) if i not in set(hub_indices)]
 
         return build_runtime_context(
             dist_uav=dist_matrix_uav,
@@ -84,7 +87,7 @@ class DynamicALNS:
             init_sol,
             rnd,
             context,
-            current_time=context.current_time,
+            current_time=context.current_time_minutes,
             traffic_matrix=context.traffic_matrix,
         )
 
@@ -104,8 +107,8 @@ class DynamicALNS:
                 context,
                 current_time=current_time,
                 traffic_matrix=context.traffic_matrix,
-                random_state=random_state,
-            )
+            ),
+            name='destroy_random',
         )
         alns.add_destroy_operator(
             lambda state, random_state: destroy_worst(
@@ -114,7 +117,8 @@ class DynamicALNS:
                 context,
                 current_time=current_time,
                 traffic_matrix=context.traffic_matrix,
-            )
+            ),
+            name='destroy_worst',
         )
         alns.add_destroy_operator(
             lambda state, random_state: destroy_shaw(
@@ -123,7 +127,8 @@ class DynamicALNS:
                 context,
                 current_time=current_time,
                 traffic_matrix=context.traffic_matrix,
-            )
+            ),
+            name='destroy_shaw',
         )
         alns.add_repair_operator(
             lambda state, random_state: repair_greedy(
@@ -132,7 +137,8 @@ class DynamicALNS:
                 context,
                 current_time=current_time,
                 traffic_matrix=context.traffic_matrix,
-            )
+            ),
+            name='repair_greedy',
         )
         if use_regret:
             alns.add_repair_operator(
@@ -142,10 +148,13 @@ class DynamicALNS:
                     context,
                     current_time=current_time,
                     traffic_matrix=context.traffic_matrix,
-                )
+                ),
+                name='repair_regret',
             )
 
-        select = RouletteWheel([2, 2, 8, 0.5], 0.8, 3, 1)
+        num_destroy = 3
+        num_repair = 2 if use_regret else 1
+        select = RouletteWheel([2, 2, 8, 0.5], 0.8, num_destroy, num_repair)
         sa = SimulatedAnnealing(1000, 1, 0.995)
         stop = MaxIterations(max_iterations)
         result = alns.iterate(init_sol, select, sa, stop)
