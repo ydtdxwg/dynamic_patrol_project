@@ -1,0 +1,1 @@
+from .static_map_loader import StaticMapEnvironment
